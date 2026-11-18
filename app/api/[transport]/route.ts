@@ -417,7 +417,7 @@ const handler = createMcpHandler(
           .optional()
           .describe(
             "'high' keeps faces, logos and fine details from the input images more faithfully (costs a little more). " +
-              "Not every model supports it; leave unset if a model refuses it.",
+              "Not every model supports it (e.g. 2.6 does not); if the model refuses it, the tool drops it and retries.",
           ),
         background: z.enum(BACKGROUNDS).optional().describe(BACKGROUND_GUIDE),
         output_format: z.enum(FORMATS).optional().describe(FORMAT_GUIDE),
@@ -461,7 +461,12 @@ const handler = createMcpHandler(
           );
 
           const mask = mask_url ? await fetchImage(mask_url, "Mask") : null;
-          const buildForm = (withModeration: boolean) => {
+          // Optional settings some models reject. If OpenAI names one, drop it and try again.
+          const optional = {
+            moderation: true,
+            input_fidelity: !!input_fidelity,
+          };
+          const buildForm = () => {
             const form = new FormData();
             form.append("model", chosen);
             form.append("prompt", prompt);
@@ -482,29 +487,33 @@ const handler = createMcpHandler(
             }
             if (size) form.append("size", size);
             if (quality) form.append("quality", quality);
-            if (input_fidelity) form.append("input_fidelity", input_fidelity);
+            if (optional.input_fidelity && input_fidelity)
+              form.append("input_fidelity", input_fidelity);
             for (const [k, v] of Object.entries(opts))
               form.append(k, String(v));
-            if (withModeration)
+            if (optional.moderation)
               form.append("moderation", moderation ?? DEFAULT_MODERATION);
             return form;
           };
 
-          const send = async (withModeration: boolean) => {
+          const send = async () => {
             const res = await fetch(`${API_BASE}/images/edits`, {
               method: "POST",
               headers: { Authorization: `Bearer ${key}` },
-              body: buildForm(withModeration),
+              body: buildForm(),
             });
             return { res, json: (await res.json()) as OpenAIImageResponse };
           };
-          let { res, json } = await send(true);
-          // If the edits endpoint does not accept 'moderation' for this model, retry once without it.
-          if (
-            !res.ok &&
-            (json?.error?.message ?? "").toLowerCase().includes("moderation")
-          ) {
-            ({ res, json } = await send(false));
+          let { res, json } = await send();
+          // Retry without an optional setting the model does not support (same model, same prompt).
+          for (let attempt = 0; attempt < 2 && !res.ok; attempt++) {
+            const msg = (json?.error?.message ?? "").toLowerCase();
+            const unsupported = (
+              Object.keys(optional) as Array<keyof typeof optional>
+            ).find((k) => optional[k] && msg.includes(k));
+            if (!unsupported) break;
+            optional[unsupported] = false;
+            ({ res, json } = await send());
           }
           if (!res.ok)
             throw new Error(json?.error?.message ?? `HTTP ${res.status}`);
