@@ -27,6 +27,28 @@ const API_BASE = "https://api.openai.com/v1";
 // Non-flagship default (cheaper/faster). Overridable via env.
 const DEFAULT_MODEL = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1.5";
 
+// Every OpenAI image model this server can call. Add new IDs here when OpenAI releases them.
+const MODELS = [
+  "auto",
+  "gpt-image-1",
+  "gpt-image-1-mini",
+  "gpt-image-1.5",
+  "gpt-image-2",
+  "gpt-image-2.5-flare",
+  "gpt-image-2.5-sunburst",
+  "gpt-image-2.6-flare",
+  "gpt-image-2.6-sunburst",
+] as const;
+
+const MODEL_GUIDE =
+  "Which OpenAI image model. 'auto' (default) uses gpt-image-2 when quality=high or for Bengali text, else gpt-image-1.5. " +
+  "Newest: gpt-image-2.6-sunburst (best detail and edit consistency) and gpt-image-2.6-flare (fastest). " +
+  "Previous generation: gpt-image-2.5-sunburst / gpt-image-2.5-flare (cheaper than 2.6 at low quality). " +
+  "Older: gpt-image-2, gpt-image-1.5, gpt-image-1, gpt-image-1-mini (cheapest). Use the model the user names.";
+
+// Quality levels. xhigh and max only work on gpt-image-2.5 and newer.
+const QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
+
 // Bengali/Bangla script renders far better on gpt-image-2. Detect by numeric
 // codepoint (U+0980–U+09FF) — no regex literal, so it survives minification.
 function hasBengali(text: string): boolean {
@@ -135,7 +157,8 @@ const handler = createMcpHandler((server) => {
     "generate_image",
     "Generate an image from a text prompt using OpenAI, host it, and return a PUBLIC URL you can embed " +
       "directly in HTML pages, slides, or markdown. Write a detailed prompt — subject, style, lighting, composition. " +
-      "Model: leave 'auto' (gpt-image-1.5 for most work; gpt-image-2 auto-selected for Bengali text or quality=high) or set it. " +
+      "Model: leave 'auto' (gpt-image-1.5 for most work; gpt-image-2 auto-selected for Bengali text or quality=high), " +
+      "or set any supported model, including gpt-image-2.5 and 2.6 Flare/Sunburst. If the user names a model, use it. " +
       "gpt-image-2 handles Bengali/Bangla text well, so prefer it when the image must render Bangla words. " +
       "Match size and quality to the NEED — do NOT default to high quality or large sizes. Use 1024x1024 + low/medium for " +
       "drafts, icons, thumbnails, simple graphics; reserve high quality and 1536-wide/tall sizes for detailed hero/print art. " +
@@ -147,17 +170,14 @@ const handler = createMcpHandler((server) => {
         .optional()
         .describe("Square/portrait/landscape. Default to 1024x1024 unless the layout truly needs a larger/other aspect."),
       quality: z
-        .enum(["low", "medium", "high", "auto"])
-        .optional()
-        .describe("Cost scales with quality. Use low/medium by default; only use high when detail genuinely matters."),
-      n: z.number().int().min(1).max(4).optional().describe("How many variations (default 1)."),
-      model: z
-        .enum(["auto", "gpt-image-1.5", "gpt-image-2"])
+        .enum(QUALITIES)
         .optional()
         .describe(
-          "Which OpenAI image model. 'auto' (default) uses gpt-image-2 when quality=high, else gpt-image-1.5. " +
-            "Pick gpt-image-2 for final/hero art, gpt-image-1.5 for drafts and iteration.",
+          "Cost scales with quality. Use low/medium by default; only use high when detail genuinely matters. " +
+            "xhigh and max work only on gpt-image-2.5 and newer.",
         ),
+      n: z.number().int().min(1).max(4).optional().describe("How many variations (default 1)."),
+      model: z.enum(MODELS).optional().describe(MODEL_GUIDE),
       include_base64: z
         .boolean()
         .optional()
@@ -200,11 +220,8 @@ const handler = createMcpHandler((server) => {
       prompt: z.string().describe("What to change."),
       mask_url: z.string().url().optional().describe("Public URL of an optional PNG mask."),
       size: z.enum(["1024x1024", "1024x1536", "1536x1024", "auto"]).optional(),
-      quality: z.enum(["low", "medium", "high", "auto"]).optional(),
-      model: z
-        .enum(["auto", "gpt-image-1.5", "gpt-image-2"])
-        .optional()
-        .describe("Which model. 'auto' (default): gpt-image-2 when quality=high, else gpt-image-1.5."),
+      quality: z.enum(QUALITIES).optional(),
+      model: z.enum(MODELS).optional().describe(MODEL_GUIDE),
       include_base64: z
         .boolean()
         .optional()
