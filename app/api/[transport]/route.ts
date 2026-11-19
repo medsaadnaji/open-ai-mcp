@@ -235,8 +235,12 @@ function ok(
 
   const content: Content[] = [
     { type: "text", text: header },
-    // First image inline so the model can also see what it made.
-    { type: "image", data: b64List[0], mimeType: MIME[format] },
+    // Every image inline so the model can also see what it made.
+    ...b64List.map((data) => ({
+      type: "image" as const,
+      data,
+      mimeType: MIME[format],
+    })),
   ];
 
   if (includeB64) {
@@ -698,12 +702,8 @@ const handler = createMcpHandler(
           if (!images.length) lines.push("No image this turn.");
 
           const out: Content[] = [{ type: "text", text: lines.join("\n\n") }];
-          if (images.length)
-            out.push({
-              type: "image",
-              data: images[0].b64,
-              mimeType: "image/png",
-            });
+          for (const img of images)
+            out.push({ type: "image", data: img.b64, mimeType: "image/png" });
           return { content: out };
         } catch (err) {
           return fail(err);
