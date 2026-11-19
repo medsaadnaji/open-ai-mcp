@@ -22,6 +22,7 @@ import { z } from "zod";
  *   OPENAI_IMAGE_MODEL      default model for 'auto' at low/medium quality (default "gpt-image-1.5")
  *   OPENAI_IMAGE_MODEL_HQ   model for 'auto' at high/xhigh/max quality (default "gpt-image-2.6-sunburst")
  *   OPENAI_IMAGE_MODERATION default content filtering, "low" or "auto" (default "low")
+ *   OPENAI_CHAT_MODEL       chat model for design_chat (default "gpt-6.2-astra")
  */
 
 const API_BASE = "https://api.openai.com/v1";
@@ -291,6 +292,28 @@ const compressionSchema = z
     "For jpeg/webp only: 0-100, higher = better quality and bigger file. Leave unset normally.",
   );
 
+// Conversational design through the Responses API (design_chat tool).
+const DEFAULT_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-6.2-astra";
+// Image models the Responses API image_generation tool accepts (no 2.6 there).
+const CHAT_IMAGE_MODELS = [
+  "gpt-image-2.5-sunburst",
+  "gpt-image-2.5-flare",
+  "gpt-image-2",
+  "gpt-image-1.5",
+  "gpt-image-1-mini",
+] as const;
+
+type ResponsesResult = {
+  id: string;
+  output?: Array<{
+    type: string;
+    result?: string;
+    revised_prompt?: string;
+    content?: Array<{ type: string; text?: string }>;
+  }>;
+  error?: { message?: string };
+};
+
 const handler = createMcpHandler(
   (server) => {
     server.tool(
@@ -526,6 +549,162 @@ const handler = createMcpHandler(
             !!include_base64,
             format,
           );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    );
+
+    server.tool(
+      "design_chat",
+      "Talk to an OpenAI chat model that designs images with its built-in image generation tool, through the " +
+        "Responses API. Unlike generate_image, it keeps a conversation: pass the session_id from the previous " +
+        "reply to continue, and the chat model remembers the brief, every earlier message and every image it made, " +
+        "and can refine them. Use it for iterative design work (logos, brand visuals). Start a new session by " +
+        "leaving session_id empty. Returns the chat model's reply, the image's public URL, the prompt it actually " +
+        "sent to the image model, and the session_id to continue.",
+      {
+        message: z
+          .string()
+          .describe(
+            "What to say to the designer: the brief on the first turn, feedback on later turns.",
+          ),
+        session_id: z
+          .string()
+          .optional()
+          .describe(
+            "The session_id from the previous design_chat reply, to continue that conversation.",
+          ),
+        reference_urls: z
+          .array(z.string().url())
+          .max(10)
+          .optional()
+          .describe(
+            "Public image URLs to show the designer with this message (references, earlier drafts).",
+          ),
+        image_model: z
+          .enum(CHAT_IMAGE_MODELS)
+          .optional()
+          .describe(
+            "Image model the designer uses. Default gpt-image-2.5-sunburst. The Responses API does not offer 2.6.",
+          ),
+        chat_model: z
+          .string()
+          .optional()
+          .describe(
+            `OpenAI chat model that leads the conversation. Default ${DEFAULT_CHAT_MODEL}.`,
+          ),
+        make_image: z
+          .boolean()
+          .optional()
+          .describe(
+            "true (default): the designer must produce an image this turn. false: it may answer in words only " +
+              "(to discuss ideas before drawing).",
+          ),
+        size: sizeSchema.optional().describe(SIZE_GUIDE),
+        quality: z.enum(QUALITIES).optional().describe(QUALITY_GUIDE),
+        background: z.enum(BACKGROUNDS).optional().describe(BACKGROUND_GUIDE),
+      },
+      async ({
+        message,
+        session_id,
+        reference_urls,
+        image_model,
+        chat_model,
+        make_image,
+        size,
+        quality,
+        background,
+      }) => {
+        try {
+          const key = process.env.OPENAI_API_KEY;
+          if (!key) throw new Error("OPENAI_API_KEY not set on the server.");
+          const imageModel = image_model ?? "gpt-image-2.5-sunburst";
+          const chatModel = chat_model ?? DEFAULT_CHAT_MODEL;
+
+          const refs = await Promise.all(
+            (reference_urls ?? []).map((u, i) =>
+              fetchImage(u, `Reference ${i + 1}`),
+            ),
+          );
+          const content: Array<Record<string, string>> = [
+            { type: "input_text", text: message },
+          ];
+          for (const r of refs) {
+            content.push({
+              type: "input_image",
+              image_url: `data:${r.mime};base64,${r.buf.toString("base64")}`,
+            });
+          }
+
+          const tool: Record<string, string> = {
+            type: "image_generation",
+            model: imageModel,
+          };
+          if (size) tool.size = size;
+          if (quality) tool.quality = quality;
+          if (background) tool.background = background;
+
+          const body: Record<string, unknown> = {
+            model: chatModel,
+            input: [{ role: "user", content }],
+            tools: [tool],
+          };
+          if (session_id) body.previous_response_id = session_id;
+          if (make_image !== false)
+            body.tool_choice = { type: "image_generation" };
+
+          const res = await fetch(`${API_BASE}/responses`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key}`,
+            },
+            body: JSON.stringify(body),
+          });
+          const json = (await res.json()) as ResponsesResult;
+          if (!res.ok)
+            throw new Error(json?.error?.message ?? `HTTP ${res.status}`);
+
+          const texts: string[] = [];
+          const images: Array<{ b64: string; revised?: string }> = [];
+          for (const item of json.output ?? []) {
+            if (item.type === "image_generation_call" && item.result) {
+              images.push({ b64: item.result, revised: item.revised_prompt });
+            } else if (item.type === "message") {
+              for (const c of item.content ?? [])
+                if (c.text) texts.push(c.text);
+            }
+          }
+
+          const urls = images.length
+            ? await hostImages(
+                images.map((i) => i.b64),
+                message,
+                "png",
+              )
+            : [];
+          const lines = [
+            `session_id: ${json.id}`,
+            `Chat model: ${chatModel}. Image model: ${imageModel}.`,
+          ];
+          if (texts.length)
+            lines.push(`Designer's reply:\n${texts.join("\n")}`);
+          images.forEach((img, i) => {
+            lines.push(`Image ${i + 1} URL:\n${urls[i]}`);
+            if (img.revised)
+              lines.push(`Prompt sent to the image model:\n${img.revised}`);
+          });
+          if (!images.length) lines.push("No image this turn.");
+
+          const out: Content[] = [{ type: "text", text: lines.join("\n\n") }];
+          if (images.length)
+            out.push({
+              type: "image",
+              data: images[0].b64,
+              mimeType: "image/png",
+            });
+          return { content: out };
         } catch (err) {
           return fail(err);
         }
