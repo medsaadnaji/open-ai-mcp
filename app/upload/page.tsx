@@ -8,7 +8,14 @@ import { useEffect, useState } from "react";
  * or enter the password once; it is remembered in this browser.
  */
 
-type Item = { id: string; name: string; preview: string; status: "uploading" | "done" | "error"; url?: string; error?: string };
+type Item = {
+  id: string;
+  name: string;
+  preview: string;
+  status: "uploading" | "done" | "error" | "deleting";
+  url?: string;
+  error?: string;
+};
 
 const MAX_SIDE = 2048; // large enough for any reference, small enough to upload fast
 
@@ -32,6 +39,8 @@ export default function UploadPage() {
   const [draft, setDraft] = useState("");
   const [items, setItems] = useState<Item[]>([]);
   const [copied, setCopied] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<Item | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   useEffect(() => {
     const fromUrl = new URLSearchParams(window.location.search).get("k");
@@ -87,6 +96,25 @@ export default function UploadPage() {
     }
   }
 
+  async function remove(it: Item) {
+    setConfirming(null);
+    if (!it.url) {
+      setItems((list) => list.filter((x) => x.id !== it.id));
+      return;
+    }
+    update(it.id, { status: "deleting", error: undefined });
+    try {
+      const res = await fetch(`/api/upload?k=${encodeURIComponent(secret)}&url=${encodeURIComponent(it.url)}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `Delete failed (${res.status})`);
+      setItems((list) => list.filter((x) => x.id !== it.id));
+    } catch (err) {
+      update(it.id, { status: "done", error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   async function copy(text: string, key: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -133,20 +161,47 @@ export default function UploadPage() {
           <ul style={styles.list}>
             {items.map((it) => (
               <li key={it.id} style={styles.item}>
-                <img src={it.preview} alt="" style={styles.thumb} />
+                <button style={styles.thumbButton} onClick={() => setViewing(it)} aria-label="Preview">
+                  <img src={it.preview} alt="" style={styles.thumb} />
+                </button>
                 <div style={styles.info}>
                   <div style={styles.name}>{it.name}</div>
                   {it.status === "uploading" && <div style={styles.muted}>Uploading…</div>}
-                  {it.status === "error" && <div style={styles.error}>{it.error}</div>}
+                  {it.status === "deleting" && <div style={styles.muted}>Deleting…</div>}
+                  {it.error && <div style={styles.error}>{it.error}</div>}
                   {it.url && (
                     <button style={styles.copy} onClick={() => copy(it.url!, it.id)}>
                       {copied === it.id ? "Copied" : "Copy link"}
                     </button>
                   )}
                 </div>
+                {it.status !== "uploading" && it.status !== "deleting" &&
+                  (confirming === it.id ? (
+                    <div style={styles.confirm}>
+                      <button style={styles.confirmYes} onClick={() => remove(it)}>
+                        Delete
+                      </button>
+                      <button style={styles.confirmNo} onClick={() => setConfirming(null)}>
+                        Keep
+                      </button>
+                    </div>
+                  ) : (
+                    <button style={styles.x} onClick={() => setConfirming(it.id)} aria-label="Delete">
+                      ×
+                    </button>
+                  ))}
               </li>
             ))}
           </ul>
+
+          {viewing && (
+            <div style={styles.overlay} onClick={() => setViewing(null)}>
+              <img src={viewing.url ?? viewing.preview} alt="" style={styles.full} />
+              <button style={styles.close} onClick={() => setViewing(null)} aria-label="Close">
+                ×
+              </button>
+            </div>
+          )}
 
           <button
             style={styles.link}
@@ -177,7 +232,15 @@ const styles: Record<string, React.CSSProperties> = {
   secondary: { marginTop: 12, width: "100%", padding: "12px 14px", fontSize: 15, border: "1px solid #1a1a1a", borderRadius: 10, background: "#fff" },
   list: { listStyle: "none", padding: 0, margin: "20px 0 0", display: "flex", flexDirection: "column", gap: 12 },
   item: { display: "flex", gap: 12, alignItems: "center", padding: 10, border: "1px solid #e5e5e5", borderRadius: 12 },
-  thumb: { width: 64, height: 64, objectFit: "cover", borderRadius: 8, background: "#f3f3f3", flexShrink: 0 },
+  thumbButton: { padding: 0, border: 0, background: "none", cursor: "zoom-in", flexShrink: 0 },
+  thumb: { display: "block", width: 64, height: 64, objectFit: "cover", borderRadius: 8, background: "#f3f3f3" },
+  x: { width: 36, height: 36, flexShrink: 0, border: 0, borderRadius: 18, background: "#f3f3f3", fontSize: 22, lineHeight: "36px", color: "#555" },
+  confirm: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 },
+  confirmYes: { padding: "6px 10px", fontSize: 13, border: 0, borderRadius: 8, background: "#b42318", color: "#fff" },
+  confirmNo: { padding: "6px 10px", fontSize: 13, border: 0, borderRadius: 8, background: "#eef0f3" },
+  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10 },
+  full: { maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 6 },
+  close: { position: "fixed", top: 14, right: 14, width: 44, height: 44, border: 0, borderRadius: 22, background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 28, lineHeight: "44px" },
   info: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 },
   name: { fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   muted: { fontSize: 13, color: "#777" },

@@ -1,9 +1,10 @@
-import { put } from "@vercel/blob";
+import { del, put } from "@vercel/blob";
 
 /**
  * Upload endpoint for the /upload page.
  *
- *   POST /api/upload?k=<MCP_SECRET>   body: the raw image bytes
+ *   POST   /api/upload?k=<MCP_SECRET>             body: the raw image bytes
+ *   DELETE /api/upload?k=<MCP_SECRET>&url=<url>   removes an uploaded image
  *
  * Stores the image in the public Blob store under uploads/ and returns
  * { url }, a public link that edit_image and design_chat accept as a reference.
@@ -53,6 +54,27 @@ export async function POST(req: Request): Promise<Response> {
       addRandomSuffix: true,
     });
     return json({ url });
+  } catch (err) {
+    return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+}
+
+/** Delete an uploaded image. Only files in this store's uploads/ folder can be deleted. */
+export async function DELETE(req: Request): Promise<Response> {
+  if (!authorized(req)) return json({ error: "Wrong or missing password." }, 401);
+  try {
+    const target = new URL(req.url).searchParams.get("url") ?? "";
+    let u: URL;
+    try {
+      u = new URL(target);
+    } catch {
+      return json({ error: "Missing or invalid url." }, 400);
+    }
+    if (!u.hostname.endsWith(".public.blob.vercel-storage.com") || !u.pathname.startsWith("/uploads/")) {
+      return json({ error: "Only uploaded reference images can be deleted here." }, 400);
+    }
+    await del(u.toString());
+    return json({ deleted: true });
   } catch (err) {
     return json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
